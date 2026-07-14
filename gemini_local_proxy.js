@@ -74,11 +74,12 @@ function scheduleCacheFlush() {
     cacheDirty = false;
     try {
       const obj = Object.fromEntries(thoughtSignaturesCache);
-      fs.writeFile(CACHE_PATH, JSON.stringify(obj), "utf8", () => {});
+      // ИСПРАВЛЕНО: Использование fs.writeFileSync для безопасного сброса кэша на диск
+      fs.writeFileSync(CACHE_PATH, JSON.stringify(obj), "utf8");
     } catch (e) {
       // Игнорируем ошибки записи
     }
-  }, 10000); // Оптимизировано (Шаг 3): задержка увеличена до 10 секунд для сбережения ресурса SSD
+  }, 10000); // Оптимизировано: задержка увеличена до 10 секунд для сбережения ресурса SSD
 }
 
 // Безопасная функция записи в кэш с отложенным сохранением на диск
@@ -411,7 +412,6 @@ class GeminiSSEResponseTransformer extends Transform {
           }
         }
 
-        // ИСПРАВЛЕНО (Шаг 1): Стираем лишний Google-контент строго после того, как кэшировали подпись
         stripExtraContent(jsonObj);
 
         return "data: " + JSON.stringify(jsonObj);
@@ -591,7 +591,6 @@ function buildRequestBody(rawBodyPayload, isGoose) {
       thinkingLevel = "high";
     }
 
-    // РАЗРЕШАЕМ THINKING_CONFIG ДЛЯ ВСЕХ КЛИЕНТОВ (Включая Goose!)
     if (!reqJson.extra_body) reqJson.extra_body = {};
     if (!reqJson.extra_body.google) reqJson.extra_body.google = {};
     reqJson.extra_body.google.thinking_config = {
@@ -975,7 +974,7 @@ const server = http.createServer((req, res) => {
       const headers = {};
       if (req.headers["content-type"])
         headers["content-type"] = req.headers["content-type"];
-      headers["connection"] = "close"; // Защита от зависания и обрыва SOCKS-сессий при долгом мышлении Gemma
+      headers["connection"] = "close";
 
       if (!isCerebras) {
         let apiKey = "";
@@ -1007,7 +1006,7 @@ const server = http.createServer((req, res) => {
         method: req.method,
         headers: buildHeaders(payload),
         agent: agent,
-        timeout: 180000, // 180 секунд (3 минуты) — согласовано с settings.json
+        timeout: 180000,
       };
 
       const targetUrl = `https://${targetHost}${targetPath}`;
@@ -1078,7 +1077,19 @@ const server = http.createServer((req, res) => {
             fileData.limit = dailyLimit;
             fileData.updatedAt = Date.now();
 
-            fs.writeFile(statePath, JSON.stringify(fileData), "utf8", () => {});
+            // ИСПРАВЛЕНО: Синхронная атомарная запись состояния лимитов для предотвращения повреждения файлов
+            try {
+              fs.writeFileSync(
+                statePath,
+                JSON.stringify(fileData, null, 2),
+                "utf8",
+              );
+            } catch (err) {
+              console.error(
+                "[Proxy State Error] Ошибка записи лимитов:",
+                err.message,
+              );
+            }
           } catch (err) {}
         }
 
@@ -1099,24 +1110,49 @@ const server = http.createServer((req, res) => {
               );
             } catch (err) {}
 
-            // ИСПРАВЛЕНО (Шаги 2 и 4): Безопасно парсим и маппим ошибку превышения лимита токенов в формат OpenAI context_length_exceeded
             let parsedErr = null;
             try {
               parsedErr = JSON.parse(errBody);
             } catch (e) {}
 
-            const isContextLimitExceeded =
+            // --- ИСПРАВЛЕНО: Преобразование ошибки 429 / RESOURCE_EXHAUSTED в стандартную схему OpenAI rate_limit_exceeded ---
+            const isRateLimit =
+              gRes.statusCode === 429 ||
               (parsedErr &&
+                parsedErr.error &&
+                parsedErr.error.status === "RESOURCE_EXHAUSTED");
+
+            if (isRateLimit) {
+              console.warn(
+                "[Proxy] Обнаружено ограничение запросов (429). Транслируем ошибку в формат OpenAI rate_limit_exceeded.",
+              );
+              const openAiError = {
+                error: {
+                  message:
+                    parsedErr?.error?.message ||
+                    "Rate limit exceeded. Please try again later.",
+                  type: "requests",
+                  param: null,
+                  code: "rate_limit_exceeded",
+                },
+              };
+              errBody = JSON.stringify(openAiError);
+            }
+
+            // --- Преобразование ошибки превышения лимита контекста ---
+            const isContextLimitExceeded =
+              !isRateLimit &&
+              ((parsedErr &&
                 parsedErr.error &&
                 typeof parsedErr.error.message === "string" &&
                 (parsedErr.error.message.includes(
                   "exceeds the maximum number of tokens allowed",
                 ) ||
                   parsedErr.error.message.includes("token count exceeds"))) ||
-              errBody.includes(
-                "exceeds the maximum number of tokens allowed",
-              ) ||
-              errBody.includes("token count exceeds");
+                errBody.includes(
+                  "exceeds the maximum number of tokens allowed",
+                ) ||
+                errBody.includes("token count exceeds"));
 
             if (isContextLimitExceeded) {
               console.warn(
@@ -1164,7 +1200,6 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        // ИСПРАВЛЕНО (Шаг 5): Предотвращаем конфликты HTTP-заголовков при повторном запросе
         if (res.headersSent) return;
 
         res.statusCode = gRes.statusCode;
@@ -1210,7 +1245,6 @@ const server = http.createServer((req, res) => {
           let responseBody = "";
           gRes.on("data", (chunk) => (responseBody += chunk));
           gRes.on("end", () => {
-            // ИСПРАВЛЕНО (Шаги 1 и 4): Безопасно парсим JSON, сохраняем подписи, санитизируем, и только перед отправкой вызываем stripExtraContent
             let jsonObj = null;
             try {
               jsonObj = JSON.parse(responseBody);
@@ -1291,7 +1325,7 @@ const server = http.createServer((req, res) => {
             }
 
             if (jsonObj) {
-              stripExtraContent(jsonObj); // Вырезаем Google-поля строго перед отправкой клиенту
+              stripExtraContent(jsonObj);
               res.end(JSON.stringify(jsonObj));
             } else {
               res.end(responseBody);
@@ -1339,9 +1373,9 @@ const server = http.createServer((req, res) => {
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const HOST = process.env.HOST || "127.0.0.1";
 
-server.keepAliveTimeout = 120000; // 2 минуты
-server.headersTimeout = 125000; // чуть больше keepAliveTimeout
-server.requestTimeout = 300000; // 5 минут на долгое мышление Gemma-4
+server.keepAliveTimeout = 120000;
+server.headersTimeout = 125000;
+server.requestTimeout = 300000;
 
 server.listen(PORT, HOST, () => {
   console.log(
