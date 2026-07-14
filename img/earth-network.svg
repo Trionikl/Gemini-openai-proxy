@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" width="100%" height="100%">
+  <defs>
+    <!-- Глубокий космический градиент для фона -->
+    <linearGradient id="space-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#04020f"/>
+      <stop offset="40%" stop-color="#090a20"/>
+      <stop offset="80%" stop-color="#120b28"/>
+      <stop offset="100%" stop-color="#240c42"/>
+    </linearGradient>
+
+    <!-- Реалистичный градиент для глубоких океанов -->
+    <radialGradient id="earth-ocean" cx="40%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="60%" stop-color="#0369a1"/>
+      <stop offset="100%" stop-color="#0c4a6e"/>
+    </radialGradient>
+
+    <!-- Изысканный градиент розового золота / коралла для пустыни Сахара и Аравии -->
+    <linearGradient id="sahara-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#be123c" /> <!-- Глубокий коралловый -->
+      <stop offset="60%" stop-color="#fb7185" /> <!-- Мягкое розовое золото -->
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0" /> <!-- Плавный переход в зелень -->
+    </linearGradient>
+
+    <!-- Мягкие неоновые свечения звезд и атмосферы -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="nebula-filter" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="55" />
+    </filter>
+
+    <!-- Маска для обрезки материков и сетей строго по форме круглой Земли -->
+    <clipPath id="earth-clip">
+      <circle cx="500" cy="250" r="170"/>
+    </clipPath>
+  </defs>
+
+  <!-- Космическое пространство -->
+  <rect width="100%" height="100%" fill="url(#space-bg)"/>
+
+  <!-- Космические туманности и пылевые облака на заднем плане -->
+  <circle cx="750" cy="150" r="190" fill="#db2777" opacity="0.08" filter="url(#nebula-filter)"/>
+  <circle cx="250" cy="320" r="160" fill="#0284c7" opacity="0.08" filter="url(#nebula-filter)"/>
+  <circle cx="500" cy="200" r="200" fill="#7c3aed" opacity="0.06" filter="url(#nebula-filter)"/>
+
+  <!-- Спиральная галактика в верхнем правом углу -->
+  <g transform="translate(800, 100) rotate(-25)" filter="url(#glow)" opacity="0.5">
+    <ellipse cx="0" cy="0" rx="40" ry="14" fill="#ffffff" opacity="0.9" filter="url(#glow)"/>
+    <path d="M 0,0 Q 50,-10 70,10 Q 90,30 60,50" fill="none" stroke="#db2777" stroke-width="3" opacity="0.5"/>
+    <path d="M 0,0 Q -50,10 -70,-10 Q -90,-30 -60,-50" fill="none" stroke="#0ea5e9" stroke-width="3" opacity="0.5"/>
+  </g>
+
+  <!-- Звездное поле с мерцанием -->
+  <g fill="#ffffff">
+    <circle cx="75" cy="60" r="1" opacity="0.8"/>
+    <circle cx="140" cy="110" r="1.5" opacity="0.5"/>
+    <circle cx="310" cy="50" r="1" opacity="0.9"/>
+    <circle cx="620" cy="60" r="1" opacity="0.7"/>
+    <circle cx="740" cy="110" r="1.5" opacity="0.6"/>
+    <circle cx="80" cy="220" r="2" opacity="0.5"/>
+    <circle cx="290" cy="200" r="1" opacity="0.8"/>
+    <circle cx="680" cy="380" r="1.5" opacity="0.9"/>
+    <circle cx="480" cy="420" r="1" opacity="0.4"/>
+    <circle cx="760" cy="300" r="2" opacity="0.5"/>
+    <circle cx="210" cy="450" r="1" opacity="0.7"/>
+    <circle cx="340" cy="380" r="1.5" opacity="0.6"/>
+  </g>
+
+  <!-- Четырехконечные яркие звезды с линзовыми бликами -->
+  <!-- Звезда 1 -->
+  <g transform="translate(680, 80)" filter="url(#glow)">
+    <path d="M 0,-15 Q 0,-3 15,-3 Q 0,-3 0,15 Q 0,-3 -15,-3 Q 0,-3 0,-15 Z" fill="#ffffff"/>
+    <circle cx="0" cy="-3" r="4" fill="#ffffff" filter="url(#glow)"/>
+  </g>
+  <!-- Звезда 2 -->
+  <g transform="translate(180, 110)" filter="url(#glow)" opacity="0.7">
+    <path d="M 0,-10 Q 0,-2 10,-2 Q 0,-2 0,10 Q 0,-2 -10,-2 Q 0,-2 0,-10 Z" fill="#ffffff"/>
+  </g>
+
+  <!-- Далекая луна -->
+  <g transform="translate(850, 380)">
+    <circle cx="0" cy="0" r="16" fill="#94a3b8" />
+    <circle cx="-5" cy="-5" r="3" fill="#64748b" opacity="0.4"/>
+    <circle cx="5" cy="5" r="2.5" fill="#64748b" opacity="0.4"/>
+  </g>
+
+  <!-- ПЛАНЕТА ЗЕМЛЯ -->
+  <!-- Атмосферный ореол -->
+  <circle cx="500" cy="250" r="185" fill="#38bdf8" opacity="0.15" filter="url(#glow)"/>
+  <circle cx="500" cy="250" r="172" fill="none" stroke="#0ea5e9" stroke-width="2" opacity="0.4"/>
+
+  <!-- Океан -->
+  <circle cx="500" cy="250" r="170" fill="url(#earth-ocean)"/>
+
+  <!-- МАТЕРИКИ (Реалистичные контуры внутри маски Земли) -->
+  <g clip-path="url(#earth-clip)">
+    <!-- Северная Америка (Атлантический ракурс) -->
+    <path d="M 260,140 Q 290,110 320,130 Q 350,150 340,180 Q 310,200 280,190 Q 250,170 260,140 Z" fill="#10b981" opacity="0.7"/>
+    <!-- Гренландия -->
+    <path d="M 360,110 Q 380,90 400,120 Q 370,140 360,110 Z" fill="#059669" opacity="0.7"/>
+
+    <!-- Евразия (Европа и Азия) -->
+    <path d="M 380,165 C 385,145 410,125 430,130 C 450,135 440,105 460,110 C 480,115 490,130 520,125 C 550,120 620,115 680,130 C 710,135 720,155 700,180 C 680,205 670,225 650,250 C 630,275 600,280 580,255 C 570,245 555,240 540,260 C 525,280 510,270 500,255 C 490,240 505,225 490,230 C 475,235 450,230 435,215 C 420,200 380,195 385,175 Z" fill="#10b981" opacity="0.8"/>
+    <!-- Горный рельеф Европы/Азии (Альпы, Кавказ, Загрос) -->
+    <path d="M 430,165 Q 460,165 480,175 Q 510,185 530,195" fill="none" stroke="#78350f" stroke-width="2.5" stroke-linecap="round" opacity="0.4" filter="url(#glow)"/>
+
+    <!-- Африка (Центральный объект) -->
+    <path d="M 420,185 C 400,185 375,195 360,215 C 345,235 340,260 355,285 C 370,310 390,320 405,335 C 420,350 435,375 450,405 C 460,425 475,435 490,435 C 505,435 510,415 515,385 C 520,355 535,320 530,305 C 525,290 490,285 485,275 C 480,265 495,260 490,245 C 485,230 460,235 420,185 Z" fill="#10b981" opacity="0.85"/>
+    
+    <!-- Наложение рельефа: Пустыня Сахара -->
+    <path d="M 420,185 C 400,185 375,195 360,215 C 345,235 340,260 355,285 C 370,290 390,280 420,285 C 450,290 490,285 485,275 C 480,265 495,260 490,245 C 485,230 460,235 420,185 Z" fill="url(#sahara-grad)" opacity="0.9"/>
+    
+    <!-- Мадагаскар -->
+    <path d="M 525,350 Q 535,360 525,390 Q 515,380 525,350 Z" fill="#059669" opacity="0.8"/>
+
+    <!-- Аравийский полуостров (рельефная пустыня) -->
+    <path d="M 488,225 C 495,225 515,220 525,235 C 535,250 530,265 515,270 C 500,275 495,260 490,245 Z" fill="url(#sahara-grad)" opacity="0.95"/>
+
+    <!-- Южная Америка (Атлантический ракурс) -->
+    <path d="M 250,270 Q 280,290 300,320 Q 320,360 290,410 Q 260,390 250,320 Z" fill="#10b981" opacity="0.75"/>
+
+    <!-- Атмосферные полупрозрачные облака -->
+    <path d="M 250,150 Q 300,120 350,160 Q 400,130 450,170" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" opacity="0.25"/>
+    <path d="M 300,320 Q 360,340 420,300 Q 480,320 540,290" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round" opacity="0.2"/>
+
+    <!-- ГЛОБАЛЬНАЯ СЕТЬ (Сверхтонкие кибер-линии на поверхности планеты) -->
+    <!-- Соединительные линии -->
+    <g stroke="#22d3ee" stroke-width="1.2" opacity="0.4">
+      <path d="M 410,180 Q 480,140 560,130" fill="none"/>
+      <path d="M 560,130 Q 560,180 540,230" fill="none"/>
+      <path d="M 410,240 Q 475,225 540,230" fill="none"/>
+      <path d="M 410,180 Q 355,190 310,210" fill="none"/>
+      <path d="M 310,210 Q 270,260 250,320" fill="none"/>
+      <path d="M 410,240 Q 320,270 250,320" fill="none"/>
+      <path d="M 410,180 L 410,240" fill="none"/>
+    </g>
+
+    <!-- Светящиеся узлы сети -->
+    <g fill="#ffffff" filter="url(#glow)">
+      <circle cx="410" cy="180" r="4"/>
+      <circle cx="410" cy="240" r="3.5"/>
+      <circle cx="560" cy="130" r="4"/>
+      <circle cx="540" cy="230" r="4.5" fill="#22d3ee"/>
+      <circle cx="310" cy="210" r="3.5"/>
+      <circle cx="250" cy="320" r="4"/>
+    </g>
+  </g>
+
+  <!-- Далекая планета с кольцами (Сатурн - обновленный кораллово-розовый цвет) -->
+  <g transform="translate(700, 80)">
+    <ellipse cx="0" cy="0" rx="30" ry="7" fill="none" stroke="#be123c" stroke-width="3" transform="rotate(-15)" opacity="0.5"/>
+    <circle cx="0" cy="0" r="15" fill="#fb7185" opacity="0.8"/>
+    <ellipse cx="0" cy="0" rx="30" ry="7" fill="none" stroke="#fb7185" stroke-width="2" transform="rotate(-15)" opacity="0.7"/>
+  </g>
+</svg>

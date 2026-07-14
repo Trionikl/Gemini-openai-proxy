@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070314"/>
+      <stop offset="50%" stop-color="#0b0f19"/>
+      <stop offset="100%" stop-color="#140b28"/>
+    </linearGradient>
+    <linearGradient id="box-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <filter id="glow-light" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="nebula" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="30" />
+    </filter>
+
+    <!-- Тонкие высокотехнологичные стрелки на концах линий -->
+    <marker id="arrow-cyan-end" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 2 2 L 8 5 L 2 8" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-violet-end" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 2 2 L 8 5 L 2 8" fill="none" stroke="#c084fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-magenta-end" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 2 2 L 8 5 L 2 8" fill="none" stroke="#f472b6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="url(#bg-grad)"/>
+
+  <!-- Фоны туманностей под узлами -->
+  <circle cx="150" cy="250" r="100" fill="#0284c7" opacity="0.1" filter="url(#nebula)"/>
+  <circle cx="500" cy="250" r="120" fill="#7c3aed" opacity="0.15" filter="url(#nebula)"/>
+  <circle cx="850" cy="250" r="100" fill="#db2777" opacity="0.1" filter="url(#nebula)"/>
+
+  <!-- Звездное поле -->
+  <g fill="#ffffff" opacity="0.5">
+    <circle cx="80" cy="100" r="1"/>
+    <circle cx="230" cy="80" r="1.5"/>
+    <circle cx="310" cy="140" r="1"/>
+    <circle cx="450" cy="90" r="2"/>
+    <circle cx="620" cy="110" r="1"/>
+    <circle cx="750" cy="70" r="1.5"/>
+    <circle cx="920" cy="120" r="1"/>
+    <circle cx="120" cy="400" r="1.5"/>
+    <circle cx="280" cy="380" r="1"/>
+    <circle cx="390" cy="420" r="2"/>
+    <circle cx="680" cy="390" r="1"/>
+    <circle cx="830" cy="410" r="1.5"/>
+    <circle cx="900" cy="350" r="1"/>
+  </g>
+
+  <!-- Пути передачи данных (зашифрованные каналы с отступами и стрелками «только вперед») -->
+  <g stroke-linecap="round" fill="none">
+    <!-- От клиента к прокси -->
+    <path d="M 190 250 L 430 250" stroke="#38bdf8" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#arrow-cyan-end)"/>
+    
+    <!-- От прокси к внешнему SSH-серверу -->
+    <path d="M 500 180 L 500 131" stroke="#a855f7" stroke-width="2" stroke-dasharray="6 4" opacity="0.8" marker-end="url(#arrow-violet-end)"/>
+    
+    <!-- От внешнего SSH-сервера FlokiNET к Google API (стрелка теперь почти касается Google Gemini) -->
+    <path d="M 602.5 115 Q 725 140 805 220" stroke="#a855f7" stroke-width="2" stroke-dasharray="6 4" opacity="0.8" marker-end="url(#arrow-magenta-end)"/>
+  </g>
+
+  <!-- Подписи потоков данных -->
+  <g font-family="system-ui, sans-serif" font-size="11" font-weight="bold" fill="#94a3b8" text-anchor="middle">
+    <!-- Путь 1: Локальный входящий -->
+    <text x="315" y="230" fill="#38bdf8">Запросы OpenAI API</text>
+    <text x="315" y="275" fill="#64748b">(/v1/chat/completions)</text>
+    
+    <!-- Путь 2: Зашифрованный локальный туннель -->
+    <text x="390" y="145" fill="#c084fc">SSH-туннель</text>
+    <text x="390" y="160" fill="#a78bfa" font-size="9" font-weight="normal">(SOCKS5 шлюз 1080)</text>
+
+    <!-- Путь 3: Внешний исходящий (подпись полностью очищена) -->
+    <text x="685" y="115" fill="#f43f5e">Google API</text>
+  </g>
+
+  <!-- Узел 1: Qwen Code CLI -->
+  <g transform="translate(130, 250)">
+    <circle cx="0" cy="0" r="50" fill="url(#box-grad)" stroke="#0284c7" stroke-width="2"/>
+    <line x1="-35" y1="-35" x2="-60" y2="-60" stroke="#38bdf8" stroke-width="2"/>
+    <circle cx="-60" cy="-60" r="4" fill="#38bdf8" filter="url(#glow-light)"/>
+    <line x1="35" y1="35" x2="50" y2="50" stroke="#0284c7" stroke-width="1.5"/>
+    <rect x="-20" y="-15" width="40" height="30" rx="4" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+    <line x1="-15" y1="0" x2="15" y2="0" stroke="#38bdf8" stroke-width="1"/>
+    <circle cx="0" cy="0" r="3" fill="#0ea5e9"/>
+    <text x="0" y="75" font-family="system-ui, sans-serif" font-size="14" font-weight="bold" fill="#f1f5f9" text-anchor="middle">Qwen Code CLI</text>
+    <text x="0" y="93" font-family="system-ui, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">ИИ-Агент Клиент</text>
+  </g>
+
+  <!-- Узел 2: gemini-openai-proxy (Локальный сервер) -->
+  <g transform="translate(500, 250)">
+    <circle cx="0" cy="0" r="60" fill="url(#box-grad)" stroke="#a855f7" stroke-width="3" filter="url(#glow-light)"/>
+    <circle cx="0" cy="0" r="45" fill="none" stroke="#c084fc" stroke-width="1" stroke-dasharray="5 5"/>
+    <polygon points="0,-25 7,-7 25,0 7,7 0,25 -7,7 -25,0 -7,-7" fill="#ffffff" filter="url(#glow-light)"/>
+    <text x="0" y="85" font-family="system-ui, sans-serif" font-size="15" font-weight="bold" fill="#f1f5f9" text-anchor="middle">gemini-openai-proxy</text>
+    <text x="0" y="103" font-family="system-ui, sans-serif" font-size="11" fill="#c084fc" font-weight="bold" text-anchor="middle">Локальный Прокси-Узел</text>
+  </g>
+
+  <!-- Узел 2b: FlokiNET SSH-сервер (Внешний хост с отступами) -->
+  <g transform="translate(500, 100)">
+    <rect x="-92.5" y="-21" width="185" height="42" rx="6" fill="#1e1b4b" stroke="#c084fc" stroke-width="1.5"/>
+    <text x="0" y="1" font-family="system-ui, sans-serif" font-size="11" font-weight="bold" fill="#e2e8f0" text-anchor="middle">FlokiNET (SSH-сервер)</text>
+    <text x="0" y="14" font-family="system-ui, sans-serif" font-size="9" fill="#a78bfa" text-anchor="middle">Зарубежный узел</text>
+  </g>
+
+  <!-- Узел 3: Google Gemini (Облако моделей) -->
+  <g transform="translate(850, 250)">
+    <g filter="url(#glow-light)">
+      <circle cx="0" cy="-35" r="8" fill="#ffffff"/>
+      <circle cx="-35" cy="15" r="6" fill="#ffffff"/>
+      <circle cx="35" cy="15" r="6" fill="#ffffff"/>
+      <circle cx="0" cy="40" r="4" fill="#ffffff"/>
+    </g>
+    <line x1="0" y1="-35" x2="-35" y2="15" stroke="#f472b6" stroke-width="2"/>
+    <line x1="0" y1="-35" x2="35" y2="15" stroke="#f472b6" stroke-width="2"/>
+    <line x1="-35" y1="15" x2="0" y2="40" stroke="#f472b6" stroke-width="1.5"/>
+    <line x1="35" y1="15" x2="0" y2="40" stroke="#f472b6" stroke-width="1.5"/>
+    <line x1="-35" y1="15" x2="35" y2="15" stroke="#f472b6" stroke-width="1" stroke-dasharray="3 3"/>
+    <text x="0" y="75" font-family="system-ui, sans-serif" font-size="14" font-weight="bold" fill="#f1f5f9" text-anchor="middle">Google Gemini API</text>
+    <text x="0" y="93" font-family="system-ui, sans-serif" font-size="11" fill="#f472b6" text-anchor="middle">Gemma 4 / Gemini 3.5</text>
+  </g>
+</svg>

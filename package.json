@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "socks-proxy-agent": "^10.1.0"
+  }
+}
