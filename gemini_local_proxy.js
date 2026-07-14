@@ -975,6 +975,7 @@ const server = http.createServer((req, res) => {
       const headers = {};
       if (req.headers["content-type"])
         headers["content-type"] = req.headers["content-type"];
+      headers["connection"] = "close"; // Защита от зависания и обрыва SOCKS-сессий при долгом мышлении Gemma
 
       if (!isCerebras) {
         let apiKey = "";
@@ -1337,6 +1338,10 @@ const server = http.createServer((req, res) => {
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const HOST = process.env.HOST || "127.0.0.1";
+
+server.keepAliveTimeout = 120000; // 2 минуты
+server.headersTimeout = 125000; // чуть больше keepAliveTimeout
+server.requestTimeout = 300000; // 5 минут на долгое мышление Gemma-4
 
 server.listen(PORT, HOST, () => {
   console.log(
