@@ -54,6 +54,6 @@
 
   <!-- Текстовое наполнение -->
   <text x="100" y="170" font-family="system-ui, -apple-system, sans-serif" font-weight="900" font-size="64" fill="url(#text-grad)" letter-spacing="2">GEMINI-OPENAI-PROXY</text>
-  <text x="105" y="220" font-family="system-ui, -apple-system, sans-serif" font-weight="500" font-size="20" fill="#94a3b8" letter-spacing="1">Интеллектуальный мост для ИИ-агентов</text>
-  <text x="105" y="250" font-family="system-ui, -apple-system, sans-serif" font-weight="400" font-size="14" fill="#64748b">Решение проблемы skip_thought_signature и лимитов контекста</text>
+  <text x="105" y="220" font-family="system-ui, -apple-system, sans-serif" font-weight="500" font-size="34" fill="#94a3b8" letter-spacing="1">Интеллектуальный мост для ИИ-агентов</text>
+  <text x="105" y="250" font-family="system-ui, -apple-system, sans-serif" font-weight="400" font-size="22" fill="#64748b">Решение проблемы skip_thought_signature и лимитов контекста</text>
 </svg>
