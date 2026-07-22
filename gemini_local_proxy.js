@@ -3,6 +3,7 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 const { Transform } = require("stream");
 const { StringDecoder } = require("string_decoder");
 const { SocksProxyAgent } = require("socks-proxy-agent");
@@ -79,60 +80,247 @@ function safeCacheSet(key, value) {
   scheduleCacheFlush();
 }
 
-// === УПРАВЛЕНИЕ ЛИМИТАМИ И ОЧЕРЕДЬЮ (ROLLING WINDOW THROTTLER) ===
-const requestHistory = []; // { timestamp, tokens }
+// === GOOGLE CONTEXT CACHING API INTEGRATION ===
+const activeContextCaches = new Map();
 
-async function acquireThrottlingPermit(
-  estimatedTokens = 10000,
-  maxTpm = 220000,
-  minDelayMs = 2500,
-) {
-  const now = Date.now();
+function createGoogleCacheHttpRequest(cachePayload, apiKey) {
+  return new Promise((resolve) => {
+    const dataStr = JSON.stringify(cachePayload);
+    const options = {
+      hostname: "generativelanguage.googleapis.com",
+      port: 443,
+      path: `/v1beta/cachedContents?key=${apiKey}`,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(dataStr),
+      },
+      agent: agent,
+      timeout: 15000,
+    };
 
-  // Очистка истории старше 60 секунд
-  while (
-    requestHistory.length > 0 &&
-    requestHistory[0].timestamp < now - 60000
-  ) {
-    requestHistory.shift();
-  }
+    const req = https.request(options, (res) => {
+      let body = "";
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => {
+        if (res.statusCode === 200 || res.statusCode === 201) {
+          try {
+            const parsed = JSON.parse(body);
+            resolve(parsed.name || null);
+          } catch (e) {
+            resolve(null);
+          }
+        } else {
+          console.warn(
+            `[Proxy Context Cache Warning] Google API статус ${res.statusCode}: ${body}`,
+          );
+          resolve(null);
+        }
+      });
+    });
 
-  let currentTokensInWindow = requestHistory.reduce(
-    (sum, item) => sum + item.tokens,
-    0,
-  );
-  let lastReqTime =
-    requestHistory.length > 0
-      ? requestHistory[requestHistory.length - 1].timestamp
-      : 0;
+    req.on("error", (err) => {
+      console.error(`[Proxy Context Cache Error]: ${err.message}`);
+      resolve(null);
+    });
 
-  let delayNeeded = 0;
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
 
-  if (currentTokensInWindow + estimatedTokens > maxTpm) {
-    if (requestHistory.length > 0) {
-      delayNeeded = Math.max(
-        delayNeeded,
-        requestHistory[0].timestamp + 60100 - now,
+    req.write(dataStr);
+    req.end();
+  });
+}
+
+async function ensureContextCached(reqJson, modelName, apiKey) {
+  if (!modelName.toLowerCase().includes("gemini") || !apiKey) return;
+  if (!Array.isArray(reqJson.messages) || reqJson.messages.length === 0) return;
+
+  const systemMsg = reqJson.messages.find((m) => m.role === "system");
+  if (!systemMsg || typeof systemMsg.content !== "string") return;
+
+  const staticContentStr = systemMsg.content;
+  const estimatedStaticTokens = Math.ceil(staticContentStr.length / 3.5);
+
+  // Порог для Google API должен быть минимум 32768 токенов
+  if (estimatedStaticTokens < 32768) return;
+
+  const contentHash = crypto
+    .createHash("sha256")
+    .update(modelName + staticContentStr)
+    .digest("hex");
+  let cacheName = activeContextCaches.get(contentHash);
+
+  if (!cacheName) {
+    console.log(
+      `[Proxy Context Cache] Регистрация кэша в Google API (~${estimatedStaticTokens} токенов)...`,
+    );
+    const cachePayload = {
+      model: `models/${modelName}`,
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: staticContentStr }],
+        },
+      ],
+      ttl: "3600s",
+    };
+
+    cacheName = await createGoogleCacheHttpRequest(cachePayload, apiKey);
+    if (cacheName) {
+      activeContextCaches.set(contentHash, cacheName);
+      console.log(
+        `[Proxy Context Cache] Успешно создан кэш Google: ${cacheName}`,
       );
     }
   }
 
-  if (now - lastReqTime < minDelayMs) {
-    delayNeeded = Math.max(delayNeeded, minDelayMs - (now - lastReqTime));
+  if (cacheName) {
+    if (!reqJson.extra_body) reqJson.extra_body = {};
+    if (!reqJson.extra_body.google) reqJson.extra_body.google = {};
+    reqJson.extra_body.google.cached_content = cacheName;
+  }
+}
+
+// === ОЧИСТКА СИРОТСКИХ ВЫЗОВОВ УТИЛИТ (ЗАЩИТА ОТ ОШИБКИ 400) ===
+function sanitizeToolCallPairs(messages) {
+  if (!Array.isArray(messages)) return;
+
+  // 1. Собираем список всех id вызовов от assistant
+  const validCallIds = new Set();
+  for (const msg of messages) {
+    if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        if (tc.id) validCallIds.add(tc.id);
+      }
+    }
+  }
+
+  // 2. Фильтруем осиротевшие ответы tool или восстанавливаем имя
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === "tool") {
+      if (!msg.tool_call_id || !validCallIds.has(msg.tool_call_id)) {
+        console.warn(
+          `[Proxy Sanitizer] Найдено осиротевшее сообщение tool (ID: ${msg.tool_call_id}). Конвертируем в текст...`,
+        );
+        messages[i] = {
+          role: "user",
+          content: `[Результат выполнения утилиты ${msg.name || "tool"}]: ${typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)}`,
+        };
+      } else if (!msg.name || msg.name === "") {
+        msg.name =
+          findFunctionNameById(messages, msg.tool_call_id) || "tool_function";
+      }
+    }
+  }
+}
+
+// === СТРАХОВОЧНАЯ АВТООБРЕЗКА ДЛЯ GEMMA 4 И ЗАЩИТА ТРАФИКА ===
+function enforcePayloadSafety(reqJson, modelName) {
+  const lower = modelName.toLowerCase();
+  if (lower.includes("gemma") && Array.isArray(reqJson.messages)) {
+    // 1. Сжимаем раздутый системный промпт
+    const systemMsg = reqJson.messages.find((m) => m.role === "system");
+    if (systemMsg && typeof systemMsg.content !== "string") {
+      let systemTokens = Math.ceil(systemMsg.content.length / 3.5);
+      if (systemTokens > 7000) {
+        console.warn(
+          `[Proxy Auto-Truncate] [GEMMA] Системный промпт слишком велик (${systemTokens} токенов). Сокращаем встроенные правила...`,
+        );
+        const rulesIndex = systemMsg.content.indexOf("<agent_rules>");
+        if (rulesIndex !== -1) {
+          systemMsg.content = systemMsg.content.substring(0, rulesIndex).trim();
+        } else {
+          systemMsg.content =
+            systemMsg.content.substring(0, 20000) +
+            "\n...[Правила сокращены под лимит Gemma]";
+        }
+      }
+    }
+
+    // 2. Обрезаем старую историю сообщений
+    let estimated = Math.ceil(JSON.stringify(reqJson).length / 3.5);
+    if (estimated > 13000 && reqJson.messages.length > 2) {
+      console.warn(
+        `[Proxy Auto-Truncate] [GEMMA] Размер пакета (${estimated} токенов) превышает лимит 16K TPM. Обрезаем старую историю...`,
+      );
+      while (estimated > 13000 && reqJson.messages.length > 2) {
+        reqJson.messages.splice(1, 1);
+        estimated = Math.ceil(JSON.stringify(reqJson).length / 3.5);
+      }
+    }
+  }
+
+  // Очищаем сиротские вызовы утилит перед отправкой в Google для ВСЕХ моделей
+  if (Array.isArray(reqJson.messages)) {
+    sanitizeToolCallPairs(reqJson.messages);
+  }
+}
+
+// === РАЗДЕЛЬНЫЕ ИСТОРИИ ВЫЗОВОВ ДЛЯ КАЖДОЙ МОДЕЛИ ===
+const modelHistories = {
+  gemma: [],
+  "gemini-3.1-lite": [],
+  "gemini-3.5-lite": [],
+  other: [],
+};
+
+function getModelLimits(modelName) {
+  const lower = modelName.toLowerCase();
+  if (lower.includes("gemma")) {
+    return { key: "gemma", maxTpm: 13500, minDelayMs: 2000 };
+  }
+  if (lower.includes("gemini-3.5-flash-lite")) {
+    return { key: "gemini-3.5-lite", maxTpm: 220000, minDelayMs: 4000 };
+  }
+  if (lower.includes("gemini-3.1-flash-lite")) {
+    return { key: "gemini-3.1-lite", maxTpm: 220000, minDelayMs: 4000 };
+  }
+  return { key: "other", maxTpm: 220000, minDelayMs: 4000 };
+}
+
+async function acquireThrottlingPermit(modelName, estimatedTokens = 5000) {
+  const config = getModelLimits(modelName);
+  const history = modelHistories[config.key];
+  const now = Date.now();
+
+  while (history.length > 0 && history[0].timestamp < now - 60000) {
+    history.shift();
+  }
+
+  let currentTokens = history.reduce((sum, item) => sum + item.tokens, 0);
+  let lastReqTime =
+    history.length > 0 ? history[history.length - 1].timestamp : 0;
+  let delayNeeded = 0;
+
+  if (currentTokens + estimatedTokens > config.maxTpm) {
+    if (history.length > 0) {
+      delayNeeded = Math.max(delayNeeded, history[0].timestamp + 60100 - now);
+    }
+  }
+
+  if (now - lastReqTime < config.minDelayMs) {
+    delayNeeded = Math.max(
+      delayNeeded,
+      config.minDelayMs - (now - lastReqTime),
+    );
   }
 
   if (delayNeeded > 0) {
     console.log(
-      `[Proxy Throttler] Удержание HTTP-сокета на ${Math.round(delayNeeded / 1000)}с для предотвращения 429 (TPM/RPM)...`,
+      `[Proxy Throttler] [${config.key.toUpperCase()}] Удержание сокета на ${Math.round(delayNeeded / 1000)}с ` +
+        `(Текущие токены: ${currentTokens}/${config.maxTpm} TPM)...`,
     );
     await new Promise((resolve) => setTimeout(resolve, delayNeeded));
   }
 
   const actualNow = Date.now();
-  requestHistory.push({ timestamp: actualNow, tokens: estimatedTokens });
+  history.push({ timestamp: actualNow, tokens: estimatedTokens });
 }
 
-// === МИНИФИКАЦИЯ SVG ДЛЯ ЭКОНОМИИ ТОКЕНОВ ===
 function optimizeSvgContent(text) {
   if (typeof text !== "string" || !text.includes("<svg")) return text;
   return text.replace(/<svg[\s\S]*?<\/svg>/gi, (svgMatch) => {
@@ -144,7 +332,6 @@ function optimizeSvgContent(text) {
   });
 }
 
-// === ПОИСК ФАЙЛОВ И КОНТЕКСТА ===
 function getContextConfig(isGoose) {
   if (isGoose) return { fileNames: [], includeDirectories: [] };
   try {
@@ -451,7 +638,6 @@ function buildRequestBody(rawBodyPayload, isGoose) {
     reqJson.model = modelName;
   }
 
-  // Чистая обработка моделей без подмены
   const isCerebras = modelName === "zai-glm-4.7";
   const isGemini = modelName.toLowerCase().includes("gemini");
   const isGemma4 =
@@ -665,10 +851,13 @@ const server = http.createServer((req, res) => {
 
   let targetPath = req.url || "";
 
-  // Чисный эндпоинт списка моделей без фантомных записей
+  if (targetPath.includes("/v1beta/openai/v1/")) {
+    targetPath = targetPath.replace("/v1beta/openai/v1/", "/v1beta/openai/");
+  }
+
   if (
     req.method === "GET" &&
-    (targetPath === "/v1/models" || targetPath === "/v1beta/openai/models")
+    (targetPath.endsWith("/models") || targetPath === "/v1/models")
   ) {
     const modelsResponse = {
       object: "list",
@@ -712,10 +901,6 @@ const server = http.createServer((req, res) => {
       userAgent.includes("reqwest") ||
       targetPath.includes("/v1beta/openai/v1/");
 
-    if (targetPath.includes("/v1beta/openai/v1/")) {
-      targetPath = targetPath.replace("/v1beta/openai/v1/", "/v1beta/openai/");
-    }
-
     let parsed = null;
     let bodyPayload = rawBodyPayload;
 
@@ -723,9 +908,26 @@ const server = http.createServer((req, res) => {
       try {
         parsed = buildRequestBody(rawBodyPayload, isGoose);
         targetHost = parsed.targetHost;
+
+        let apiKey = req.headers["x-goog-api-key"];
+        if (!apiKey && req.headers["authorization"]) {
+          const authHeader = req.headers["authorization"];
+          apiKey = authHeader.startsWith("Bearer ")
+            ? authHeader.substring(7).trim()
+            : authHeader.trim();
+        }
+        if (!apiKey) apiKey = process.env.GEMINI_API_KEY;
+
+        // 1. Автоматическая регистрация кэша в Google API (для моделей Gemini)
+        await ensureContextCached(parsed.reqJson, parsed.modelName, apiKey);
+
+        // 2. Страховочная автообрезка и очистка осиротевших вызовов утилит
+        enforcePayloadSafety(parsed.reqJson, parsed.modelName);
+
         bodyPayload = Buffer.from(JSON.stringify(parsed.reqJson), "utf8");
 
-        await acquireThrottlingPermit(parsed.estimatedTokens, 220000, 2500);
+        // 3. Раздельный троттлинг TPM/RPM с удержанием HTTP-сокета
+        await acquireThrottlingPermit(parsed.modelName, parsed.estimatedTokens);
       } catch (e) {
         console.error("[Proxy] Ошибка разбора запроса:", e.message);
         parsed = null;
