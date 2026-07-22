@@ -3,11 +3,11 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { Readable, Transform } = require("stream");
+const { Transform } = require("stream");
 const { StringDecoder } = require("string_decoder");
 const { SocksProxyAgent } = require("socks-proxy-agent");
 
-// === Встроенный легковесный парсер .env ===
+// === Встроенный парсер .env ===
 function loadEnv() {
   const envPath = path.join(__dirname, ".env");
   if (fs.existsSync(envPath)) {
@@ -22,31 +22,22 @@ function loadEnv() {
         const val = trimmed.substring(eqIndex + 1).trim();
         process.env[key] = val;
       });
-      console.log(
-        "[Proxy Env] Файл .env успешно загружен и применен к process.env.",
-      );
+      console.log("[Proxy Env] Файл .env успешно загружен.");
     } catch (e) {
       console.error("[Proxy Env] Ошибка разбора .env:", e.message);
     }
-  } else {
-    console.log(
-      "[Proxy Env] Файл .env не найден, используются переменные окружения по умолчанию.",
-    );
   }
 }
 
-// Загружаем переменные окружения перед инициализацией агента
 loadEnv();
 
-// Подключаемся к запущенному туннелю SOCKS5
 const socksProxyUrl = process.env.SOCKS_PROXY || "socks5h://127.0.0.1:1080";
 const agent = new SocksProxyAgent(socksProxyUrl);
 
-// Путь к файлу персистентного кэша на диске
+// === КЭШ ПОДПИСЕЙ МЫСЛЕЙ НА ДИСКЕ ===
 const CACHE_PATH = path.join(os.tmpdir(), "qwen_thought_signatures.json");
 const thoughtSignaturesCache = new Map();
 
-// Загрузка сохраненного кэша с диска при старте прокси-сервера
 try {
   if (fs.existsSync(CACHE_PATH)) {
     const fileContent = fs.readFileSync(CACHE_PATH, "utf8");
@@ -55,14 +46,13 @@ try {
       thoughtSignaturesCache.set(key, val);
     }
     console.log(
-      `[Proxy Cache] Загружено ${thoughtSignaturesCache.size} подписей из локального файла на диске.`,
+      `[Proxy Cache] Загружено ${thoughtSignaturesCache.size} подписей мыслей из кэша.`,
     );
   }
 } catch (e) {
-  console.error("[Proxy Cache] Ошибка инициализации кэша с диска:", e.message);
+  console.error("[Proxy Cache] Ошибка чтения кэша:", e.message);
 }
 
-// Флаг и таймер для отложенной (не блокирующей) записи кэша на диск
 let cacheDirty = false;
 let cacheFlushTimer = null;
 function scheduleCacheFlush() {
@@ -74,15 +64,11 @@ function scheduleCacheFlush() {
     cacheDirty = false;
     try {
       const obj = Object.fromEntries(thoughtSignaturesCache);
-      // ИСПРАВЛЕНО: Использование fs.writeFileSync для безопасного сброса кэша на диск
       fs.writeFileSync(CACHE_PATH, JSON.stringify(obj), "utf8");
-    } catch (e) {
-      // Игнорируем ошибки записи
-    }
-  }, 10000); // Оптимизировано: задержка увеличена до 10 секунд для сбережения ресурса SSD
+    } catch (e) {}
+  }, 10000);
 }
 
-// Безопасная функция записи в кэш с отложенным сохранением на диск
 function safeCacheSet(key, value) {
   if (!key) return;
   if (thoughtSignaturesCache.size > 2000) {
@@ -93,17 +79,78 @@ function safeCacheSet(key, value) {
   scheduleCacheFlush();
 }
 
-// === Функция для получения конфигурации контекста из settings.json ===
-function getContextConfig(isGoose) {
-  if (isGoose) {
-    return { fileNames: [], includeDirectories: [] };
+// === УПРАВЛЕНИЕ ЛИМИТАМИ И ОЧЕРЕДЬЮ (ROLLING WINDOW THROTTLER) ===
+const requestHistory = []; // { timestamp, tokens }
+
+async function acquireThrottlingPermit(
+  estimatedTokens = 10000,
+  maxTpm = 220000,
+  minDelayMs = 2500,
+) {
+  const now = Date.now();
+
+  // Очистка истории старше 60 секунд
+  while (
+    requestHistory.length > 0 &&
+    requestHistory[0].timestamp < now - 60000
+  ) {
+    requestHistory.shift();
   }
 
+  let currentTokensInWindow = requestHistory.reduce(
+    (sum, item) => sum + item.tokens,
+    0,
+  );
+  let lastReqTime =
+    requestHistory.length > 0
+      ? requestHistory[requestHistory.length - 1].timestamp
+      : 0;
+
+  let delayNeeded = 0;
+
+  if (currentTokensInWindow + estimatedTokens > maxTpm) {
+    if (requestHistory.length > 0) {
+      delayNeeded = Math.max(
+        delayNeeded,
+        requestHistory[0].timestamp + 60100 - now,
+      );
+    }
+  }
+
+  if (now - lastReqTime < minDelayMs) {
+    delayNeeded = Math.max(delayNeeded, minDelayMs - (now - lastReqTime));
+  }
+
+  if (delayNeeded > 0) {
+    console.log(
+      `[Proxy Throttler] Удержание HTTP-сокета на ${Math.round(delayNeeded / 1000)}с для предотвращения 429 (TPM/RPM)...`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, delayNeeded));
+  }
+
+  const actualNow = Date.now();
+  requestHistory.push({ timestamp: actualNow, tokens: estimatedTokens });
+}
+
+// === МИНИФИКАЦИЯ SVG ДЛЯ ЭКОНОМИИ ТОКЕНОВ ===
+function optimizeSvgContent(text) {
+  if (typeof text !== "string" || !text.includes("<svg")) return text;
+  return text.replace(/<svg[\s\S]*?<\/svg>/gi, (svgMatch) => {
+    return svgMatch
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/>\s+</g, "><")
+      .replace(/\s+/g, " ")
+      .trim();
+  });
+}
+
+// === ПОИСК ФАЙЛОВ И КОНТЕКСТА ===
+function getContextConfig(isGoose) {
+  if (isGoose) return { fileNames: [], includeDirectories: [] };
   try {
     const settingsPath = path.join(os.homedir(), ".qwen", "settings.json");
     if (fs.existsSync(settingsPath)) {
-      const content = fs.readFileSync(settingsPath, "utf8");
-      const settings = JSON.parse(content);
+      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
       if (settings.context) {
         return {
           fileNames: Array.isArray(settings.context.fileName)
@@ -115,29 +162,19 @@ function getContextConfig(isGoose) {
         };
       }
     }
-  } catch (e) {
-    console.error(
-      "[Proxy] Ошибка чтения settings.json для получения конфигурации контекста:",
-      e.message,
-    );
-  }
-
+  } catch (e) {}
   return { fileNames: [], includeDirectories: [] };
 }
 
-// === Умная функция поиска и чтения файлов на диске ===
 function findAndReadFile(fileName, includeDirs) {
   for (const dir of includeDirs) {
     const fullPath = path.join(dir, fileName);
     if (fs.existsSync(fullPath)) {
       try {
         return fs.readFileSync(fullPath, "utf8");
-      } catch (err) {
-        console.error(`[Proxy Loader] Ошибка чтения ${fullPath}:`, err.message);
-      }
+      } catch (err) {}
     }
   }
-
   let currentDir = process.cwd();
   for (let i = 0; i < 5; i++) {
     const fullPath = path.join(currentDir, fileName);
@@ -150,19 +187,9 @@ function findAndReadFile(fileName, includeDirs) {
     if (parentDir === currentDir) break;
     currentDir = parentDir;
   }
-
-  const qwenDir = path.join(os.homedir(), ".qwen");
-  const qwenFullPath = path.join(qwenDir, fileName);
-  if (fs.existsSync(qwenFullPath)) {
-    try {
-      return fs.readFileSync(qwenFullPath, "utf8");
-    } catch (err) {}
-  }
-
   return null;
 }
 
-// Поиск имени функции в истории диалога по ID вызова инструмента
 function findFunctionNameById(messages, toolCallId) {
   if (!toolCallId) return null;
   for (const msg of messages) {
@@ -177,65 +204,34 @@ function findFunctionNameById(messages, toolCallId) {
   return null;
 }
 
-// Глубокое сохранение мысленных подписей из полученного ответа Google
 function cacheThoughtSignatures(obj) {
   if (!obj || typeof obj !== "object") return;
   if (Array.isArray(obj)) {
     for (const item of obj) cacheThoughtSignatures(item);
   } else {
-    let sig = null;
-    if (
-      obj.extra_content &&
-      obj.extra_content.google &&
-      obj.extra_content.google.thought_signature
-    ) {
-      sig = obj.extra_content.google.thought_signature;
-    } else if (obj.thought_signature) {
-      sig = obj.thought_signature;
-    } else if (obj.thoughtSignature) {
-      sig = obj.thoughtSignature;
-    }
-
+    let sig =
+      obj.extra_content?.google?.thought_signature ||
+      obj.thought_signature ||
+      obj.thoughtSignature;
     if (obj.id && sig) {
       safeCacheSet(obj.id, sig);
-      console.log(
-        `[Proxy Cache] Сохранена подпись thought_signature для ID: ${obj.id}`,
-      );
-
-      if (obj.function && obj.function.name) {
-        const argsText =
-          typeof obj.function.arguments === "object"
-            ? JSON.stringify(obj.function.arguments)
-            : obj.function.arguments;
-        console.log(
-          `[Proxy Tool Call] -> Модель вызвала инструмент: "${obj.function.name}" с аргументами: ${argsText}`,
-        );
-      }
     }
     for (const key of Object.keys(obj)) {
-      if (typeof obj[key] === "object") {
-        cacheThoughtSignatures(obj[key]);
-      }
+      if (typeof obj[key] === "object") cacheThoughtSignatures(obj[key]);
     }
   }
 }
 
-// Санитайзер исходящих вызовов инструментов: приводит ответы Google к стандартам OpenAI (index, type, JSON arguments)
 function sanitizeResponseToolCalls(obj) {
   if (!obj || typeof obj !== "object") return;
   if (Array.isArray(obj)) {
     for (let i = 0; i < obj.length; i++) {
-      const item = obj[i];
-      if (item && typeof item === "object") {
-        if (item.function) {
-          if (item.index === undefined) {
-            item.index = i;
-          }
-          if (!item.type) {
-            item.type = "function";
-          }
+      if (obj[i] && typeof obj[i] === "object") {
+        if (obj[i].function) {
+          if (obj[i].index === undefined) obj[i].index = i;
+          if (!obj[i].type) obj[i].type = "function";
         }
-        sanitizeResponseToolCalls(item);
+        sanitizeResponseToolCalls(obj[i]);
       }
     }
   } else {
@@ -244,20 +240,14 @@ function sanitizeResponseToolCalls(obj) {
       obj.function.arguments &&
       typeof obj.function.arguments === "object"
     ) {
-      console.log(
-        `[Proxy Sanitizer] Оцифрованы аргументы функции "${obj.function.name}" из объекта в строку JSON.`,
-      );
       obj.function.arguments = JSON.stringify(obj.function.arguments);
     }
     for (const key of Object.keys(obj)) {
-      if (typeof obj[key] === "object") {
-        sanitizeResponseToolCalls(obj[key]);
-      }
+      if (typeof obj[key] === "object") sanitizeResponseToolCalls(obj[key]);
     }
   }
 }
 
-// Очистка нестандартных Google-полей перед отправкой ответа клиенту (Goose / Qwen), чтобы строгие Rust/OpenAI-парсеры не ломались
 function stripExtraContent(obj) {
   if (!obj || typeof obj !== "object") return;
   if (Array.isArray(obj)) {
@@ -267,22 +257,19 @@ function stripExtraContent(obj) {
     delete obj["thought_signature"];
     delete obj["thoughtSignature"];
     for (const key of Object.keys(obj)) {
-      if (typeof obj[key] === "object") {
-        stripExtraContent(obj[key]);
-      }
+      if (typeof obj[key] === "object") stripExtraContent(obj[key]);
     }
   }
 }
 
-// === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ОЧИСТКИ JSON SCHEMA ===
 function sanitizeSchema(obj) {
   if (obj === null || typeof obj !== "object") return;
-
   delete obj["$schema"];
   delete obj["additionalProperties"];
   delete obj["default"];
   delete obj["propertyNames"];
   delete obj["patternProperties"];
+  delete obj["unevaluatedProperties"];
 
   for (const key of Object.keys(obj)) {
     if (typeof obj[key] === "object" && obj[key] !== null) {
@@ -291,10 +278,8 @@ function sanitizeSchema(obj) {
   }
 }
 
-// Полная зачистка "отравленных" thought_signature из истории сообщений.
 function stripThoughtSignaturesForRetry(reqJson) {
   const clone = JSON.parse(JSON.stringify(reqJson));
-
   if (Array.isArray(clone.messages)) {
     for (const msg of clone.messages) {
       if (msg.extra_content) delete msg.extra_content;
@@ -305,11 +290,10 @@ function stripThoughtSignaturesForRetry(reqJson) {
       }
     }
   }
-
   return clone;
 }
 
-// === КЛАСС-ТРАНСФОРМЕР (Разделение мыслей - адаптировано под Gemma-4 и Gemini) ===
+// === СТРИМ-ТРАНСФОРМЕР С ПАРСИНГОМ МЫСЛЕЙ ===
 class GeminiSSEResponseTransformer extends Transform {
   constructor(options) {
     super(options);
@@ -324,17 +308,13 @@ class GeminiSSEResponseTransformer extends Transform {
 
   _transform(chunk, encoding, callback) {
     this.lineBuffer += this.decoder.write(chunk);
-
     let lineEndIndex;
     while ((lineEndIndex = this.lineBuffer.indexOf("\n")) !== -1) {
       const line = this.lineBuffer.substring(0, lineEndIndex).trim();
       this.lineBuffer = this.lineBuffer.substring(lineEndIndex + 1);
-
       if (line) {
         const transformedLine = this.processLine(line);
-        if (transformedLine !== null) {
-          this.push(transformedLine + "\n\n");
-        }
+        if (transformedLine !== null) this.push(transformedLine + "\n\n");
       }
     }
     callback();
@@ -342,65 +322,39 @@ class GeminiSSEResponseTransformer extends Transform {
 
   _flush(callback) {
     this.lineBuffer += this.decoder.end();
-
     if (this.lineBuffer.trim()) {
       const transformedLine = this.processLine(this.lineBuffer.trim());
-      if (transformedLine !== null) {
-        this.push(transformedLine + "\n\n");
-      }
+      if (transformedLine !== null) this.push(transformedLine + "\n\n");
     }
-
     const finalFlush = this.flushTagBuffer();
-    if (finalFlush) {
-      this.push(finalFlush + "\n\n");
-    }
+    if (finalFlush) this.push(finalFlush + "\n\n");
 
     if (this.accumulatedContent.trim() && this.accumulatedSignature) {
       safeCacheSet(this.accumulatedContent.trim(), this.accumulatedSignature);
-      console.log(
-        `[Proxy Cache] [Stream End] Сохранена подпись для текста: "${this.accumulatedContent.trim().substring(0, 40)}..."`,
-      );
     }
-
     callback();
   }
 
   processLine(line) {
     if (line.startsWith("data:")) {
       const dataStr = line.substring(5).trim();
-      if (dataStr === "[DONE]") {
-        return line;
-      }
-
+      if (dataStr === "[DONE]") return line;
       try {
         const jsonObj = JSON.parse(dataStr);
-
         cacheThoughtSignatures(jsonObj);
-        sanitizeResponseToolCalls(jsonObj); // Конвертируем аргументы в строку и добавляем index при стриминге
+        sanitizeResponseToolCalls(jsonObj);
 
         if (jsonObj.choices && jsonObj.choices.length > 0) {
           const choice = jsonObj.choices[0];
           if (choice.delta) {
-            let sig = null;
-            if (
-              choice.delta.extra_content &&
-              choice.delta.extra_content.google &&
-              choice.delta.extra_content.google.thought_signature
-            ) {
-              sig = choice.delta.extra_content.google.thought_signature;
-            }
-            if (sig) {
-              this.accumulatedSignature = sig;
-            }
+            let sig = choice.delta.extra_content?.google?.thought_signature;
+            if (sig) this.accumulatedSignature = sig;
 
             if (typeof choice.delta.content === "string") {
               const content = choice.delta.content;
               const { deltaContent, deltaReasoning } =
                 this.processContent(content);
-
-              if (deltaContent) {
-                this.accumulatedContent += deltaContent;
-              }
+              if (deltaContent) this.accumulatedContent += deltaContent;
 
               choice.delta.content = deltaContent;
               if (deltaReasoning) {
@@ -411,9 +365,7 @@ class GeminiSSEResponseTransformer extends Transform {
             }
           }
         }
-
         stripExtraContent(jsonObj);
-
         return "data: " + JSON.stringify(jsonObj);
       } catch (e) {
         return line;
@@ -425,69 +377,37 @@ class GeminiSSEResponseTransformer extends Transform {
   processContent(content) {
     let deltaContent = "";
     let deltaReasoning = "";
-
     this.tagBuffer += content;
 
     while (this.tagBuffer.length > 0) {
       if (!this.isThinking) {
-        const indexThought = this.tagBuffer.indexOf("<thought>");
-        const indexThinking = this.tagBuffer.indexOf("<thinking>");
-        const indexThink = this.tagBuffer.indexOf("<think>");
-
-        let index = -1;
-        let tagLen = 0;
-        let activeTag = "";
-
-        let candidates = [
-          { index: indexThought, len: "<thought>".length, tag: "thought" },
-          { index: indexThinking, len: "<thinking>".length, tag: "thinking" },
-          { index: indexThink, len: "<think>".length, tag: "think" },
-        ].filter((c) => c.index !== -1);
-
-        candidates.sort((a, b) => a.index - b.index);
+        const candidates = [
+          {
+            index: this.tagBuffer.indexOf("<thought>"),
+            len: 9,
+            tag: "thought",
+          },
+          {
+            index: this.tagBuffer.indexOf("<thinking>"),
+            len: 10,
+            tag: "thinking",
+          },
+          { index: this.tagBuffer.indexOf("<think>"), len: 7, tag: "think" },
+        ]
+          .filter((c) => c.index !== -1)
+          .sort((a, b) => a.index - b.index);
 
         if (candidates.length > 0) {
           const earliest = candidates[0];
-          index = earliest.index;
-          tagLen = earliest.len;
-          activeTag = earliest.tag;
-        }
-
-        if (index !== -1) {
-          deltaContent += this.tagBuffer.substring(0, index);
+          deltaContent += this.tagBuffer.substring(0, earliest.index);
           this.isThinking = true;
-          if (activeTag === "thought") this.currentEndTag = "</thought>";
-          else if (activeTag === "thinking") this.currentEndTag = "</thinking>";
-          else if (activeTag === "think") this.currentEndTag = "</think>";
-
-          this.tagBuffer = this.tagBuffer.substring(index + tagLen);
+          this.currentEndTag = `</${earliest.tag}>`;
+          this.tagBuffer = this.tagBuffer.substring(
+            earliest.index + earliest.len,
+          );
         } else {
-          const partialThought = this.getPartialMatch(
-            this.tagBuffer,
-            "<thought>",
-          );
-          const partialThinking = this.getPartialMatch(
-            this.tagBuffer,
-            "<thinking>",
-          );
-          const partialThink = this.getPartialMatch(this.tagBuffer, "<think>");
-
-          let partialIndex = -1;
-          let partials = [partialThought, partialThinking, partialThink].filter(
-            (p) => p !== -1,
-          );
-          if (partials.length > 0) {
-            partialIndex = Math.min(...partials);
-          }
-
-          if (partialIndex !== -1) {
-            deltaContent += this.tagBuffer.substring(0, partialIndex);
-            this.tagBuffer = this.tagBuffer.substring(partialIndex);
-            break;
-          } else {
-            deltaContent += this.tagBuffer;
-            this.tagBuffer = "";
-          }
+          deltaContent += this.tagBuffer;
+          this.tagBuffer = "";
         }
       } else {
         const index = this.tagBuffer.indexOf(this.currentEndTag);
@@ -498,34 +418,12 @@ class GeminiSSEResponseTransformer extends Transform {
             index + this.currentEndTag.length,
           );
         } else {
-          const partialIndex = this.getPartialMatch(
-            this.tagBuffer,
-            this.currentEndTag,
-          );
-          if (partialIndex !== -1) {
-            deltaReasoning += this.tagBuffer.substring(0, partialIndex);
-            this.tagBuffer = this.tagBuffer.substring(partialIndex);
-            break;
-          } else {
-            deltaReasoning += this.tagBuffer;
-            this.tagBuffer = "";
-          }
+          deltaReasoning += this.tagBuffer;
+          this.tagBuffer = "";
         }
       }
     }
-
     return { deltaContent, deltaReasoning };
-  }
-
-  getPartialMatch(str, target) {
-    const maxLen = Math.min(str.length, target.length - 1);
-    for (let len = maxLen; len >= 1; len--) {
-      const prefix = target.substring(0, len);
-      if (str.endsWith(prefix)) {
-        return str.length - len;
-      }
-    }
-    return -1;
   }
 
   flushTagBuffer() {
@@ -543,7 +441,7 @@ class GeminiSSEResponseTransformer extends Transform {
   }
 }
 
-// === ПРЕОБРАЗОВАНИЕ ВХОДЯЩЕГО ЗАПРОСА ===
+// === ПРЕОБРАЗОВАНИЕ ЗАПРОСА ===
 function buildRequestBody(rawBodyPayload, isGoose) {
   let reqJson = JSON.parse(rawBodyPayload.toString("utf8"));
   let modelName = reqJson.model || "unknown";
@@ -551,17 +449,9 @@ function buildRequestBody(rawBodyPayload, isGoose) {
   if (modelName.startsWith("models/")) {
     modelName = modelName.substring(7);
     reqJson.model = modelName;
-    console.log(
-      `[Proxy Router] Стрипнут префикс 'models/'. Модель приведена к чистому виду: ${modelName}`,
-    );
   }
 
-  const isSpoofedGemini = modelName === "deepseek-reasoner";
-  if (isSpoofedGemini) {
-    modelName = "gemini-3.1-flash-lite";
-    reqJson.model = "gemini-3.1-flash-lite";
-  }
-
+  // Чистая обработка моделей без подмены
   const isCerebras = modelName === "zai-glm-4.7";
   const isGemini = modelName.toLowerCase().includes("gemini");
   const isGemma4 =
@@ -575,21 +465,12 @@ function buildRequestBody(rawBodyPayload, isGoose) {
 
   if (isCerebras) {
     targetHost = "api.cerebras.ai";
-    shouldParseThoughts = false;
-    shouldOptimizePrompt = false;
-    console.log(
-      `[Proxy Router] Обнаружена модель Cerebras: ${modelName}. Перенаправляем трафик на api.cerebras.ai`,
-    );
   } else if (isThinkingModel) {
     shouldParseThoughts = true;
     shouldOptimizePrompt = !isGoose;
 
-    let thinkingLevel = "medium";
-    if (isGemma4) {
-      thinkingLevel = "high";
-    } else if (modelName.toLowerCase().includes("pro")) {
-      thinkingLevel = "high";
-    }
+    let thinkingLevel =
+      isGemma4 || modelName.toLowerCase().includes("pro") ? "high" : "medium";
 
     if (!reqJson.extra_body) reqJson.extra_body = {};
     if (!reqJson.extra_body.google) reqJson.extra_body.google = {};
@@ -597,16 +478,6 @@ function buildRequestBody(rawBodyPayload, isGoose) {
       thinking_level: thinkingLevel,
       include_thoughts: true,
     };
-
-    console.log(
-      `[Proxy Router] Обнаружена модель с рассуждениями: ${modelName}. Клиент: ${isGoose ? "Goose" : "Qwen CLI"}. Уровень мышления: ${thinkingLevel.toUpperCase()}. Thinking_config включен.`,
-    );
-  } else {
-    shouldParseThoughts = false;
-    shouldOptimizePrompt = false;
-    console.log(
-      `[Proxy Router] Модель: ${modelName}. Режим сквозной передачи (Bypass) через Google.`,
-    );
   }
 
   if (!isCerebras) {
@@ -617,34 +488,36 @@ function buildRequestBody(rawBodyPayload, isGoose) {
     delete reqJson.reasoning_effort;
 
     const maxAllowedTokens = 8192;
-    if (reqJson.max_tokens && reqJson.max_tokens > maxAllowedTokens) {
+    if (reqJson.max_tokens && reqJson.max_tokens > maxAllowedTokens)
       reqJson.max_tokens = maxAllowedTokens;
-    }
     if (
       reqJson.max_completion_tokens &&
       reqJson.max_completion_tokens > maxAllowedTokens
-    ) {
+    )
       reqJson.max_completion_tokens = maxAllowedTokens;
-    }
 
     if (Array.isArray(reqJson.tools)) {
       for (const tool of reqJson.tools) {
-        if (
-          tool.type === "function" &&
-          tool.function &&
-          tool.function.parameters
-        ) {
+        if (tool.type === "function" && tool.function?.parameters) {
           sanitizeSchema(tool.function.parameters);
         }
       }
     }
 
     if (reqJson.messages && Array.isArray(reqJson.messages)) {
-      for (let i = 0; i < reqJson.messages.length; i++) {
-        const msg = reqJson.messages[i];
+      for (let msg of reqJson.messages) {
+        if (msg.content === null || msg.content === undefined) msg.content = "";
 
-        if (msg.content === null || msg.content === undefined) {
-          msg.content = "";
+        if (msg.role === "user") {
+          if (typeof msg.content === "string") {
+            msg.content = optimizeSvgContent(msg.content);
+          } else if (Array.isArray(msg.content)) {
+            for (let part of msg.content) {
+              if (part && typeof part.text === "string") {
+                part.text = optimizeSvgContent(part.text);
+              }
+            }
+          }
         }
 
         if (
@@ -660,21 +533,12 @@ function buildRequestBody(rawBodyPayload, isGoose) {
             reqJson.messages,
             msg.tool_call_id,
           );
-          if (reconstructedName) {
-            msg.name = reconstructedName;
-          } else if (
-            reqJson.tools &&
-            reqJson.tools[0] &&
-            reqJson.tools[0].function
-          ) {
-            msg.name = reqJson.tools[0].function.name;
-          } else {
-            msg.name = "tool_function";
-          }
+          msg.name =
+            reconstructedName ||
+            reqJson.tools?.[0]?.function?.name ||
+            "tool_function";
         }
       }
-
-      let stubCount = 0;
 
       for (let i = 0; i < reqJson.messages.length; i++) {
         const msg = reqJson.messages[i];
@@ -684,18 +548,15 @@ function buildRequestBody(rawBodyPayload, isGoose) {
             if (
               reqJson.messages[j].role === "assistant" ||
               reqJson.messages[j].role === "user"
-            ) {
+            )
               break;
-            }
-            if (reqJson.messages[j].role === "tool") {
+            if (reqJson.messages[j].role === "tool")
               toolResponses.push(reqJson.messages[j]);
-            }
           }
 
           for (let k = 0; k < msg.tool_calls.length; k++) {
             const tc = msg.tool_calls[k];
             const resp = toolResponses[k];
-
             if (resp) {
               const sharedId =
                 tc.id && tc.id !== "null"
@@ -706,54 +567,7 @@ function buildRequestBody(rawBodyPayload, isGoose) {
                       Math.random().toString(36).substring(2, 7);
               tc.id = sharedId;
               resp.tool_call_id = sharedId;
-            } else if (!tc.id || tc.id === "" || tc.id === "null") {
-              tc.id =
-                `call_sync_${k}_` + Math.random().toString(36).substring(2, 7);
             }
-          }
-
-          for (let k = msg.tool_calls.length; k < toolResponses.length; k++) {
-            const resp = toolResponses[k];
-            if (
-              !resp.tool_call_id ||
-              resp.tool_call_id === "" ||
-              resp.tool_call_id === "null"
-            ) {
-              resp.tool_call_id =
-                `call_orphaned_${k}_` +
-                Math.random().toString(36).substring(2, 7);
-            }
-          }
-
-          const responseIds = new Set(toolResponses.map((r) => r.tool_call_id));
-          const originalToolCalls = msg.tool_calls;
-          msg.tool_calls = originalToolCalls.filter((tc) =>
-            responseIds.has(tc.id),
-          );
-
-          const currentCallIds = new Set(msg.tool_calls.map((tc) => tc.id));
-          for (const resp of toolResponses) {
-            const callId = resp.tool_call_id;
-            if (!currentCallIds.has(callId)) {
-              msg.tool_calls.push({
-                id: callId,
-                type: "function",
-                function: {
-                  name:
-                    resp.name ||
-                    (reqJson.tools &&
-                    reqJson.tools[0] &&
-                    reqJson.tools[0].function
-                      ? reqJson.tools[0].function.name
-                      : "tool_function"),
-                  arguments: "{}",
-                },
-              });
-            }
-          }
-
-          if (msg.tool_calls.length === 0) {
-            delete msg.tool_calls;
           }
         }
       }
@@ -761,146 +575,66 @@ function buildRequestBody(rawBodyPayload, isGoose) {
       for (const msg of reqJson.messages) {
         if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
           for (const tc of msg.tool_calls) {
-            if (
-              tc.extra_content &&
-              tc.extra_content.google &&
-              tc.extra_content.google.thought_signature
-            ) {
-              continue;
-            }
-
-            let signatureToInject = "skip_thought_signature_validator";
-            if (thoughtSignaturesCache.has(tc.id)) {
-              signatureToInject = thoughtSignaturesCache.get(tc.id);
-            } else {
-              stubCount++;
-            }
-
+            let signatureToInject =
+              thoughtSignaturesCache.get(tc.id) ||
+              "skip_thought_signature_validator";
             tc.extra_content = {
               google: { thought_signature: signatureToInject },
             };
           }
         }
+      }
 
-        if (
-          msg.role === "assistant" &&
-          (!msg.tool_calls || msg.tool_calls.length === 0)
-        ) {
-          if (msg.content && typeof msg.content === "string") {
-            const cleanContent = msg.content.trim();
-            if (thoughtSignaturesCache.has(cleanContent)) {
-              msg.extra_content = {
-                google: {
-                  thought_signature: thoughtSignaturesCache.get(cleanContent),
-                },
-              };
-            }
+      if (shouldOptimizePrompt) {
+        const config = getContextConfig(isGoose);
+        let systemMessages = [];
+        let otherMessages = [];
+        let agentRulesText = "";
+        const filesMap = new Map();
+
+        for (const fileName of config.fileNames) {
+          const fileContent = findAndReadFile(
+            fileName,
+            config.includeDirectories,
+          );
+          if (fileContent) {
+            filesMap.set(fileName, fileContent);
+            agentRulesText += `\n\n=== FILE: ${fileName} ===\n${fileContent}`;
           }
         }
-      }
 
-      if (stubCount >= 3) {
-        console.warn(
-          `[Proxy Warning] В запросе ${stubCount} сообщений с заглушкой skip_thought_signature_validator. ` +
-            `Это частая причина стабильной ошибки 500 INTERNAL у Google. Если ошибка повторится, прокси автоматически повторит запрос без строгой валидации подписей.`,
-        );
-      }
-    }
-
-    if (
-      shouldOptimizePrompt &&
-      reqJson.messages &&
-      Array.isArray(reqJson.messages)
-    ) {
-      const config = getContextConfig(isGoose);
-      let systemMessages = [];
-      let otherMessages = [];
-      let agentRulesText = "";
-      const filesMap = new Map();
-
-      for (const fileName of config.fileNames) {
-        const fileContent = findAndReadFile(
-          fileName,
-          config.includeDirectories,
-        );
-        if (fileContent) {
-          filesMap.set(fileName, fileContent);
-          agentRulesText += `\n\n=== FILE: ${fileName} ===\n${fileContent}`;
-          console.log(`[Proxy Loader] Успешно загружен файл: ${fileName}`);
-        }
-      }
-
-      for (let msg of reqJson.messages) {
-        let msgContentStr = "";
-        if (typeof msg.content === "string") {
-          msgContentStr = msg.content;
-        } else if (Array.isArray(msg.content)) {
-          msgContentStr = msg.content
-            .map((part) =>
-              part && typeof part === "object" && typeof part.text === "string"
-                ? part.text
-                : "",
-            )
-            .join(" ");
-        }
-
-        if (msg.role === "system") {
-          systemMessages.push(msgContentStr);
-        } else {
-          const isDuplicateFileMsg =
-            msg.role === "user" &&
-            config.fileNames.some((fileName) => {
-              const fileContent = filesMap.get(fileName);
-              if (!fileContent) return false;
-              if (msgContentStr.length < 200) return false;
-              const cleanFileHead = fileContent
-                .replace(/\s+/g, "")
-                .substring(0, 150)
-                .toLowerCase();
-              const cleanMsg = msgContentStr.replace(/\s+/g, "").toLowerCase();
-              return (
-                cleanFileHead.length > 50 && cleanMsg.includes(cleanFileHead)
-              );
-            });
-
-          if (!isDuplicateFileMsg) {
+        for (let msg of reqJson.messages) {
+          let msgContentStr =
+            typeof msg.content === "string"
+              ? msg.content
+              : Array.isArray(msg.content)
+                ? msg.content.map((p) => p.text || "").join(" ")
+                : "";
+          if (msg.role === "system") {
+            systemMessages.push(msgContentStr);
+          } else {
             otherMessages.push(msg);
           }
         }
+
+        let finalSystemContent = `<system_role>
+Ты — автономный ИИ-агент разработчик (Qwen Code Agent). Выполняй команды и выдавай только готовый код.
+</system_role>`;
+
+        if (systemMessages.length > 0)
+          finalSystemContent += `\n\n<agent_environment_rules>\n${systemMessages.join("\n\n")}\n</agent_environment_rules>`;
+        if (agentRulesText)
+          finalSystemContent += `\n\n<agent_rules>\n${agentRulesText.trim()}\n</agent_rules>`;
+
+        reqJson.messages = [
+          { role: "system", content: finalSystemContent },
+          ...otherMessages,
+        ];
       }
-
-      if (otherMessages.length === 0) {
-        otherMessages.push({
-          role: "user",
-          content:
-            "Инициализация сессии. Файлы правил проекта успешно загружены.",
-        });
-      }
-
-      let finalSystemContent = `<system_role>
-Ты — автономный, бескомпромиссный ИИ-агент разработчик (Qwen Code Agent). Твоя задача — мгновенное выполнение команд и написание кода.
-</system_role>
-
-<critical_instructions>
-1. Не задавай вопросов формата "делать мне это или нет". Делай молча и сразу.
-2. Не пиши вежливых приветствий, не извиняйся и не размышляй вслух в основном ответе.
-3. Полностью и безоговорочно подчиняйся правилам из файлов инструкций, переданных ниже.
-4. Выдавай только готовый код или результат работы утилит.
-</critical_instructions>`;
-
-      if (systemMessages.length > 0) {
-        finalSystemContent += `\n\n<agent_environment_rules>\n${systemMessages.join("\n\n")}\n</agent_environment_rules>`;
-      }
-      if (agentRulesText) {
-        finalSystemContent += `\n\n<agent_rules_do_not_ignore>\n${agentRulesText.trim()}\n</agent_rules_do_not_ignore>`;
-      }
-
-      reqJson.messages = [
-        { role: "system", content: finalSystemContent },
-        ...otherMessages,
-      ];
     }
   }
+
+  const estimatedTokens = Math.ceil(JSON.stringify(reqJson).length / 3.5);
 
   return {
     reqJson,
@@ -908,6 +642,7 @@ function buildRequestBody(rawBodyPayload, isGoose) {
     targetHost,
     isCerebras,
     shouldParseThoughts,
+    estimatedTokens,
   };
 }
 
@@ -928,22 +663,54 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  let targetPath = req.url || "";
+
+  // Чисный эндпоинт списка моделей без фантомных записей
+  if (
+    req.method === "GET" &&
+    (targetPath === "/v1/models" || targetPath === "/v1beta/openai/models")
+  ) {
+    const modelsResponse = {
+      object: "list",
+      data: [
+        {
+          id: "gemini-3.5-flash-lite",
+          object: "model",
+          created: 1700000000,
+          owned_by: "google",
+        },
+        {
+          id: "gemini-3.1-flash-lite",
+          object: "model",
+          created: 1700000000,
+          owned_by: "google",
+        },
+        {
+          id: "gemma-4-31b-it",
+          object: "model",
+          created: 1700000000,
+          owned_by: "google",
+        },
+      ],
+    };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(modelsResponse));
+    return;
+  }
+
   let bodyChunks = [];
   req.on("data", (chunk) => bodyChunks.push(chunk));
 
-  req.on("end", () => {
+  req.on("end", async () => {
     const rawBodyPayload =
       bodyChunks.length > 0 ? Buffer.concat(bodyChunks) : Buffer.alloc(0);
-
     let targetHost = "generativelanguage.googleapis.com";
-    let targetPath = req.url;
 
     const userAgent = (req.headers["user-agent"] || "").toLowerCase();
-    const originalPath = req.url || "";
     const isGoose =
       userAgent.includes("goose") ||
       userAgent.includes("reqwest") ||
-      originalPath.includes("/v1beta/openai/v1/");
+      targetPath.includes("/v1beta/openai/v1/");
 
     if (targetPath.includes("/v1beta/openai/v1/")) {
       targetPath = targetPath.replace("/v1beta/openai/v1/", "/v1beta/openai/");
@@ -957,11 +724,10 @@ const server = http.createServer((req, res) => {
         parsed = buildRequestBody(rawBodyPayload, isGoose);
         targetHost = parsed.targetHost;
         bodyPayload = Buffer.from(JSON.stringify(parsed.reqJson), "utf8");
+
+        await acquireThrottlingPermit(parsed.estimatedTokens, 220000, 2500);
       } catch (e) {
-        console.error(
-          "[Proxy] Ошибка при разборе/перегруппировке запроса:",
-          e.message,
-        );
+        console.error("[Proxy] Ошибка разбора запроса:", e.message);
         parsed = null;
       }
     }
@@ -977,18 +743,14 @@ const server = http.createServer((req, res) => {
       headers["connection"] = "close";
 
       if (!isCerebras) {
-        let apiKey = "";
-        if (req.headers["x-goog-api-key"]) {
-          apiKey = req.headers["x-goog-api-key"];
-        } else if (req.headers["authorization"]) {
+        let apiKey = req.headers["x-goog-api-key"];
+        if (!apiKey && req.headers["authorization"]) {
           const authHeader = req.headers["authorization"];
           apiKey = authHeader.startsWith("Bearer ")
             ? authHeader.substring(7).trim()
             : authHeader.trim();
         }
-        if (!apiKey) {
-          apiKey = process.env.GEMINI_API_KEY;
-        }
+        if (!apiKey) apiKey = process.env.GEMINI_API_KEY;
         if (apiKey) headers["authorization"] = `Bearer ${apiKey}`;
       } else if (req.headers["authorization"]) {
         headers["authorization"] = req.headers["authorization"];
@@ -1009,16 +771,7 @@ const server = http.createServer((req, res) => {
         timeout: 180000,
       };
 
-      const targetUrl = `https://${targetHost}${targetPath}`;
-      console.log(
-        `[Proxy] Направление запроса${isRetryAttempt ? " (ПОВТОР без thought_signature)" : ""}: ${req.method} -> ${targetUrl}`,
-      );
-
       const gReq = https.request(options, (gRes) => {
-        console.log(
-          `[Proxy] Ответ сервера (${targetHost}): статус ${gRes.statusCode}`,
-        );
-
         if (gRes.statusCode === 200 || gRes.statusCode === 201) {
           try {
             const statePath = path.join(os.tmpdir(), "qwen_limits_state.json");
@@ -1026,32 +779,20 @@ const server = http.createServer((req, res) => {
             let dailyLimit = 1500;
             const lowerModel = modelName.toLowerCase();
 
-            if (lowerModel.includes("gemini-3.1-flash-lite")) {
-              modelKey = "gemini-lite";
+            if (lowerModel.includes("gemini-3.5-flash-lite")) {
+              modelKey = "gemini-3.5-lite";
+              dailyLimit = 500;
+            } else if (lowerModel.includes("gemini-3.1-flash-lite")) {
+              modelKey = "gemini-3.1-lite";
               dailyLimit = 500;
             } else if (lowerModel.includes("gemma")) {
               modelKey = "gemma";
               dailyLimit = 1500;
-            } else if (lowerModel.includes("pro")) {
-              modelKey = "pro";
-              dailyLimit = 50;
-            } else if (
-              lowerModel.includes("flash") ||
-              lowerModel.includes("lite")
-            ) {
-              modelKey = "other-flash";
-              dailyLimit = 20;
             }
 
             const todayStr = new Date().toDateString();
             let fileData = {
-              models: {
-                "gemini-lite": 500,
-                gemma: 1500,
-                pro: 50,
-                "other-flash": 20,
-                other: 1500,
-              },
+              models: {},
               lastResetDate: todayStr,
               remaining: dailyLimit,
               limit: dailyLimit,
@@ -1061,10 +802,8 @@ const server = http.createServer((req, res) => {
             if (fs.existsSync(statePath)) {
               try {
                 const existing = JSON.parse(fs.readFileSync(statePath, "utf8"));
-                if (existing.lastResetDate === todayStr) {
-                  fileData.models = existing.models || fileData.models;
-                  fileData.lastResetDate = existing.lastResetDate;
-                }
+                if (existing.lastResetDate === todayStr)
+                  fileData.models = existing.models || {};
               } catch (err) {}
             }
 
@@ -1074,22 +813,13 @@ const server = http.createServer((req, res) => {
                 : dailyLimit;
             fileData.models[modelKey] = Math.max(0, currentRemaining - 1);
             fileData.remaining = fileData.models[modelKey];
-            fileData.limit = dailyLimit;
             fileData.updatedAt = Date.now();
 
-            // ИСПРАВЛЕНО: Синхронная атомарная запись состояния лимитов для предотвращения повреждения файлов
-            try {
-              fs.writeFileSync(
-                statePath,
-                JSON.stringify(fileData, null, 2),
-                "utf8",
-              );
-            } catch (err) {
-              console.error(
-                "[Proxy State Error] Ошибка записи лимитов:",
-                err.message,
-              );
-            }
+            fs.writeFileSync(
+              statePath,
+              JSON.stringify(fileData, null, 2),
+              "utf8",
+            );
           } catch (err) {}
         }
 
@@ -1097,36 +827,16 @@ const server = http.createServer((req, res) => {
           let errBody = "";
           gRes.on("data", (c) => (errBody += c));
           gRes.on("end", () => {
-            console.error(`[API Error Body from ${targetHost}]: ${errBody}`);
-
-            try {
-              const debugPath = path.join(
-                os.tmpdir(),
-                "qwen_failed_request.json",
-              );
-              fs.writeFileSync(debugPath, payload, "utf8");
-              console.error(
-                `[Proxy Debug] Сбойный JSON-запрос сохранен в: ${debugPath}`,
-              );
-            } catch (err) {}
-
             let parsedErr = null;
             try {
               parsedErr = JSON.parse(errBody);
             } catch (e) {}
 
-            // --- ИСПРАВЛЕНО: Преобразование ошибки 429 / RESOURCE_EXHAUSTED в стандартную схему OpenAI rate_limit_exceeded ---
-            const isRateLimit =
+            if (
               gRes.statusCode === 429 ||
-              (parsedErr &&
-                parsedErr.error &&
-                parsedErr.error.status === "RESOURCE_EXHAUSTED");
-
-            if (isRateLimit) {
-              console.warn(
-                "[Proxy] Обнаружено ограничение запросов (429). Транслируем ошибку в формат OpenAI rate_limit_exceeded.",
-              );
-              const openAiError = {
+              parsedErr?.error?.status === "RESOURCE_EXHAUSTED"
+            ) {
+              errBody = JSON.stringify({
                 error: {
                   message:
                     parsedErr?.error?.message ||
@@ -1135,55 +845,31 @@ const server = http.createServer((req, res) => {
                   param: null,
                   code: "rate_limit_exceeded",
                 },
-              };
-              errBody = JSON.stringify(openAiError);
+              });
             }
 
-            // --- Преобразование ошибки превышения лимита контекста ---
-            const isContextLimitExceeded =
-              !isRateLimit &&
-              ((parsedErr &&
-                parsedErr.error &&
-                typeof parsedErr.error.message === "string" &&
-                (parsedErr.error.message.includes(
-                  "exceeds the maximum number of tokens allowed",
-                ) ||
-                  parsedErr.error.message.includes("token count exceeds"))) ||
-                errBody.includes(
-                  "exceeds the maximum number of tokens allowed",
-                ) ||
-                errBody.includes("token count exceeds"));
-
-            if (isContextLimitExceeded) {
-              console.warn(
-                "[Proxy] Обнаружено превышение лимита токенов Google. Транслируем ошибку в формат OpenAI context_length_exceeded.",
-              );
-              const openAiError = {
+            if (
+              gRes.statusCode !== 429 &&
+              (errBody.includes("exceeds the maximum number of tokens") ||
+                errBody.includes("token count exceeds"))
+            ) {
+              errBody = JSON.stringify({
                 error: {
                   message:
-                    parsedErr?.error?.message ||
-                    "The input token count exceeds the maximum number of tokens allowed 262144.",
+                    parsedErr?.error?.message || "Context length exceeded.",
                   type: "invalid_request_error",
                   param: "messages",
                   code: "context_length_exceeded",
                 },
-              };
-              errBody = JSON.stringify(openAiError);
+              });
             }
 
-            const isInternalError =
-              gRes.statusCode === 500 && /internal/i.test(errBody);
-
-            if (isInternalError && !isRetryAttempt && parsed) {
+            if (gRes.statusCode === 500 && !isRetryAttempt && parsed) {
               console.warn(
-                "[Proxy Auto-Retry] Google вернул 500 INTERNAL. Вероятная причина: накопленные заглушки " +
-                  "thought_signature в истории диалога. Повторяю запрос без thinking_config и без старых подписей...",
-              );
-              const safeReqJson = stripThoughtSignaturesForRetry(
-                parsed.reqJson,
+                "[Proxy Auto-Retry] Ошибка 500 INTERNAL от Google. Повтор без устаревших подписей...",
               );
               const safePayload = Buffer.from(
-                JSON.stringify(safeReqJson),
+                JSON.stringify(stripThoughtSignaturesForRetry(parsed.reqJson)),
                 "utf8",
               );
               sendToGoogle(safePayload, true);
@@ -1204,19 +890,13 @@ const server = http.createServer((req, res) => {
 
         res.statusCode = gRes.statusCode;
         Object.keys(gRes.headers).forEach((key) => {
-          const lowerKey = key.toLowerCase();
           if (
-            [
-              "content-length",
-              "connection",
-              "keep-alive",
-              "transfer-encoding",
-              "content-encoding",
-            ].includes(lowerKey)
+            !["content-length", "connection", "transfer-encoding"].includes(
+              key.toLowerCase(),
+            )
           ) {
-            return;
+            res.setHeader(key, gRes.headers[key]);
           }
-          res.setHeader(key, gRes.headers[key]);
         });
 
         const contentType = gRes.headers["content-type"] || "";
@@ -1225,21 +905,8 @@ const server = http.createServer((req, res) => {
           if (shouldParseThoughts) {
             const transformer = new GeminiSSEResponseTransformer();
             gRes.pipe(transformer).pipe(res);
-            gRes.on("error", (err) => {
-              console.error(`[Proxy gRes Error]: ${err.message}`);
-              transformer.destroy(err);
-              res.destroy(err);
-            });
-            transformer.on("error", (err) => {
-              console.error(`[Proxy Transformer Error]: ${err.message}`);
-              res.destroy(err);
-            });
           } else {
             gRes.pipe(res);
-            gRes.on("error", (err) => {
-              console.error(`[Proxy gRes Error]: ${err.message}`);
-              res.destroy(err);
-            });
           }
         } else if (contentType.includes("json")) {
           let responseBody = "";
@@ -1250,84 +917,9 @@ const server = http.createServer((req, res) => {
               jsonObj = JSON.parse(responseBody);
               cacheThoughtSignatures(jsonObj);
               sanitizeResponseToolCalls(jsonObj);
-            } catch (err) {
-              console.error(
-                "[Proxy] Ошибка безопасного парсинга JSON ответа:",
-                err.message,
-              );
-            }
-
-            if (jsonObj && shouldParseThoughts) {
-              try {
-                if (
-                  jsonObj.choices &&
-                  jsonObj.choices.length > 0 &&
-                  jsonObj.choices[0].message
-                ) {
-                  const message = jsonObj.choices[0].message;
-                  let content = message.content || "";
-
-                  let startTag = "";
-                  let endTag = "";
-                  if (
-                    content.includes("<thought>") &&
-                    content.includes("</thought>")
-                  ) {
-                    startTag = "<thought>";
-                    endTag = "</thought>";
-                  } else if (
-                    content.includes("<thinking>") &&
-                    content.includes("</thinking>")
-                  ) {
-                    startTag = "<thinking>";
-                    endTag = "</thinking>";
-                  } else if (
-                    content.includes("<think>") &&
-                    content.includes("</think>")
-                  ) {
-                    startTag = "<think>";
-                    endTag = "</think>";
-                  }
-
-                  if (startTag && endTag) {
-                    const start = content.indexOf(startTag);
-                    const end = content.indexOf(endTag);
-                    const reasoning = content.substring(
-                      start + startTag.length,
-                      end,
-                    );
-                    const newContent =
-                      content.substring(0, start) +
-                      content.substring(end + endTag.length);
-
-                    message.content = newContent;
-                    message.reasoning_content = reasoning;
-
-                    let sig =
-                      message.extra_content &&
-                      message.extra_content.google &&
-                      message.extra_content.google.thought_signature;
-                    if (sig) safeCacheSet(newContent.trim(), sig);
-                  } else {
-                    let sig =
-                      message.extra_content &&
-                      message.extra_content.google &&
-                      message.extra_content.google.thought_signature;
-                    if (sig && content) safeCacheSet(content.trim(), sig);
-                  }
-                }
-              } catch (processingError) {
-                console.error(
-                  "[Proxy] Ошибка постобработки JSON:",
-                  processingError.message,
-                );
-              }
-            }
-
-            if (jsonObj) {
               stripExtraContent(jsonObj);
               res.end(JSON.stringify(jsonObj));
-            } else {
+            } catch (err) {
               res.end(responseBody);
             }
           });
@@ -1336,29 +928,17 @@ const server = http.createServer((req, res) => {
         }
       });
 
-      gReq.on("timeout", () => {
-        console.error(
-          `[Proxy Timeout] Исходящее соединение через SOCKS-туннель зависло (таймаут 180 сек). Принудительный разрыв сокета.`,
-        );
-        gReq.destroy(new Error("Upstream request timed out"));
-      });
-
+      gReq.on("timeout", () =>
+        gReq.destroy(new Error("Upstream request timed out")),
+      );
       gReq.on("error", (error) => {
-        console.error(`[Proxy Connection Error]: ${error.message}`);
         if (!res.headersSent) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              error_type: "LOCAL_PROXY_CRASH",
-              message: `Proxy timeout or connection lost: ${error.message}`,
-              attempted_url: targetUrl,
+              error: { message: error.message, code: "LOCAL_PROXY_ERROR" },
             }),
           );
-        } else {
-          console.error(
-            `[Proxy Streaming Error] Aborting client stream response due to error.`,
-          );
-          res.destroy(error);
         }
       });
 
@@ -1375,11 +955,10 @@ const HOST = process.env.HOST || "127.0.0.1";
 
 server.keepAliveTimeout = 120000;
 server.headersTimeout = 125000;
-server.requestTimeout = 300000;
 
 server.listen(PORT, HOST, () => {
   console.log(
     `Intellectual Multi-Model Local Proxy running on http://${HOST}:${PORT}`,
   );
-  console.log(`Routing all outbound traffic via SOCKS5 on ${socksProxyUrl}`);
+  console.log(`Routing via SOCKS5: ${socksProxyUrl}`);
 });
