@@ -144,7 +144,6 @@ async function ensureContextCached(reqJson, modelName, apiKey) {
   const staticContentStr = systemMsg.content;
   const estimatedStaticTokens = Math.ceil(staticContentStr.length / 3.5);
 
-  // Порог для Google API должен быть минимум 32768 токенов
   if (estimatedStaticTokens < 32768) return;
 
   const contentHash = crypto
@@ -188,7 +187,6 @@ async function ensureContextCached(reqJson, modelName, apiKey) {
 function sanitizeToolCallPairs(messages) {
   if (!Array.isArray(messages)) return;
 
-  // 1. Собираем список всех id вызовов от assistant
   const validCallIds = new Set();
   for (const msg of messages) {
     if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
@@ -198,7 +196,6 @@ function sanitizeToolCallPairs(messages) {
     }
   }
 
-  // 2. Фильтруем осиротевшие ответы tool или восстанавливаем имя
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role === "tool") {
@@ -222,7 +219,6 @@ function sanitizeToolCallPairs(messages) {
 function enforcePayloadSafety(reqJson, modelName) {
   const lower = modelName.toLowerCase();
   if (lower.includes("gemma") && Array.isArray(reqJson.messages)) {
-    // 1. Сжимаем раздутый системный промпт
     const systemMsg = reqJson.messages.find((m) => m.role === "system");
     if (systemMsg && typeof systemMsg.content !== "string") {
       let systemTokens = Math.ceil(systemMsg.content.length / 3.5);
@@ -241,7 +237,6 @@ function enforcePayloadSafety(reqJson, modelName) {
       }
     }
 
-    // 2. Обрезаем старую историю сообщений
     let estimated = Math.ceil(JSON.stringify(reqJson).length / 3.5);
     if (estimated > 13000 && reqJson.messages.length > 2) {
       console.warn(
@@ -254,7 +249,6 @@ function enforcePayloadSafety(reqJson, modelName) {
     }
   }
 
-  // Очищаем сиротские вызовы утилит перед отправкой в Google для ВСЕХ моделей
   if (Array.isArray(reqJson.messages)) {
     sanitizeToolCallPairs(reqJson.messages);
   }
@@ -271,15 +265,15 @@ const modelHistories = {
 function getModelLimits(modelName) {
   const lower = modelName.toLowerCase();
   if (lower.includes("gemma")) {
-    return { key: "gemma", maxTpm: 13500, minDelayMs: 2000 };
+    return { key: "gemma", maxTpm: 13500, minDelayMs: 200 };
   }
   if (lower.includes("gemini-3.5-flash-lite")) {
-    return { key: "gemini-3.5-lite", maxTpm: 220000, minDelayMs: 4000 };
+    return { key: "gemini-3.5-lite", maxTpm: 220000, minDelayMs: 200 };
   }
   if (lower.includes("gemini-3.1-flash-lite")) {
-    return { key: "gemini-3.1-lite", maxTpm: 220000, minDelayMs: 4000 };
+    return { key: "gemini-3.1-lite", maxTpm: 220000, minDelayMs: 200 };
   }
-  return { key: "other", maxTpm: 220000, minDelayMs: 4000 };
+  return { key: "other", maxTpm: 220000, minDelayMs: 200 };
 }
 
 async function acquireThrottlingPermit(modelName, estimatedTokens = 5000) {
@@ -533,6 +527,13 @@ class GeminiSSEResponseTransformer extends Transform {
 
         if (jsonObj.choices && jsonObj.choices.length > 0) {
           const choice = jsonObj.choices[0];
+
+          if (choice.finish_reason && choice.finish_reason !== "null") {
+            console.log(
+              `[Proxy Stream] Генерация завершена. Причина: ${choice.finish_reason}`,
+            );
+          }
+
           if (choice.delta) {
             let sig = choice.delta.extra_content?.google?.thought_signature;
             if (sig) this.accumulatedSignature = sig;
@@ -552,7 +553,10 @@ class GeminiSSEResponseTransformer extends Transform {
             }
           }
         }
+
+        // КРИТИЧЕСКИ ВАЖНО: удаляем служебные поля Google, иначе строгий парсер Goose (Rust) падает и рвет соединение!
         stripExtraContent(jsonObj);
+
         return "data: " + JSON.stringify(jsonObj);
       } catch (e) {
         return line;
@@ -673,14 +677,10 @@ function buildRequestBody(rawBodyPayload, isGoose) {
     delete reqJson.service_tier;
     delete reqJson.reasoning_effort;
 
-    const maxAllowedTokens = 8192;
-    if (reqJson.max_tokens && reqJson.max_tokens > maxAllowedTokens)
-      reqJson.max_tokens = maxAllowedTokens;
-    if (
-      reqJson.max_completion_tokens &&
-      reqJson.max_completion_tokens > maxAllowedTokens
-    )
-      reqJson.max_completion_tokens = maxAllowedTokens;
+    // ПРИНУДИТЕЛЬНО заставляем Google отдавать длинные ответы.
+    // Удаляем max_completion_tokens, так как Google запрещает передавать оба параметра одновременно!
+    delete reqJson.max_completion_tokens;
+    reqJson.max_tokens = 65536;
 
     if (Array.isArray(reqJson.tools)) {
       for (const tool of reqJson.tools) {
@@ -909,6 +909,16 @@ const server = http.createServer((req, res) => {
         parsed = buildRequestBody(rawBodyPayload, isGoose);
         targetHost = parsed.targetHost;
 
+        const msgCount = parsed.reqJson.messages
+          ? parsed.reqJson.messages.length
+          : 0;
+        const hasTools =
+          Array.isArray(parsed.reqJson.tools) &&
+          parsed.reqJson.tools.length > 0;
+        console.log(
+          `\n[Proxy REQ] --> Client: ${isGoose ? "Goose" : "Qwen/Client"} | Model: ${parsed.modelName} | Messages: ${msgCount} | Tools: ${hasTools ? "YES" : "NO"} | Est. Tokens: ~${parsed.estimatedTokens}`,
+        );
+
         let apiKey = req.headers["x-goog-api-key"];
         if (!apiKey && req.headers["authorization"]) {
           const authHeader = req.headers["authorization"];
@@ -918,15 +928,10 @@ const server = http.createServer((req, res) => {
         }
         if (!apiKey) apiKey = process.env.GEMINI_API_KEY;
 
-        // 1. Автоматическая регистрация кэша в Google API (для моделей Gemini)
         await ensureContextCached(parsed.reqJson, parsed.modelName, apiKey);
-
-        // 2. Страховочная автообрезка и очистка осиротевших вызовов утилит
         enforcePayloadSafety(parsed.reqJson, parsed.modelName);
 
         bodyPayload = Buffer.from(JSON.stringify(parsed.reqJson), "utf8");
-
-        // 3. Раздельный троттлинг TPM/RPM с удержанием HTTP-сокета
         await acquireThrottlingPermit(parsed.modelName, parsed.estimatedTokens);
       } catch (e) {
         console.error("[Proxy] Ошибка разбора запроса:", e.message);
@@ -963,6 +968,8 @@ const server = http.createServer((req, res) => {
     }
 
     function sendToGoogle(payload, isRetryAttempt) {
+      const startTime = Date.now();
+
       const options = {
         hostname: targetHost,
         port: 443,
@@ -974,6 +981,12 @@ const server = http.createServer((req, res) => {
       };
 
       const gReq = https.request(options, (gRes) => {
+        const duration = Date.now() - startTime;
+
+        console.log(
+          `[Proxy RES] <-- Status: ${gRes.statusCode} (${duration}ms) | Model: ${modelName}`,
+        );
+
         if (gRes.statusCode === 200 || gRes.statusCode === 201) {
           try {
             const statePath = path.join(os.tmpdir(), "qwen_limits_state.json");
@@ -1029,6 +1042,10 @@ const server = http.createServer((req, res) => {
           let errBody = "";
           gRes.on("data", (c) => (errBody += c));
           gRes.on("end", () => {
+            console.error(
+              `[Proxy Upstream Error ${gRes.statusCode}] Detail: ${errBody.substring(0, 300)}`,
+            );
+
             let parsedErr = null;
             try {
               parsedErr = JSON.parse(errBody);
